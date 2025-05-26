@@ -22,6 +22,7 @@
 using System;
 using System.Data;
 using System.Globalization;
+using System.Linq;
 using System.Threading;
 using Dapper;
 using Hangfire.Logging;
@@ -53,6 +54,10 @@ namespace Hangfire.PostgreSql
       "hash",
     };
 
+    private static readonly string[] _enhancedTables = {
+      "job"
+    };
+
     private readonly TimeSpan _checkInterval;
     private readonly PostgreSqlStorage _storage;
 
@@ -63,6 +68,55 @@ namespace Hangfire.PostgreSql
     {
       _storage = storage ?? throw new ArgumentNullException(nameof(storage));
       _checkInterval = checkInterval;
+    }
+
+    private void EnhancedJobExpire(string table, CancellationToken cancellationToken)
+    {
+        UseConnectionDistributedLock(_storage, connection => {
+          using IDbTransaction transaction = connection.BeginTransaction();
+          int removedCount;
+          do
+          {
+            // XXX: To avoid triggers on YugabyteDB we need to disable them on the current session...
+            //      session_replication_role default value is origin.
+            connection.Execute($@"
+              SET session_replication_role='replica';
+          ");
+
+            // XXX: The main goal of the deletion below is to isolate every table related to job and avoid triggers (DELETE ON CASCADE) to improve performance in YugabyteDB.
+            removedCount = connection.Execute($@"
+                WITH ids AS (
+                  SELECT ""id"" FROM ""{_storage.Options.SchemaName}"".""{table}"" WHERE expireat < now() LIMIT {_storage.Options.DeleteExpiredBatchSize.ToString(CultureInfo.InvariantCulture)}
+                ),
+                delete_parameters AS (
+                  DELETE FROM ""{_storage.Options.SchemaName}.jobparameter"" WHERE ""jobid"" = ANY (ARRAY(SELECT ""id"" FROM ""ids""))
+                ),
+                delete_states AS (
+                  DELETE FROM ""{_storage.Options.SchemaName}.state""  WHERE ""jobid"" = ANY (ARRAY(SELECT ""id"" FROM ""ids""))
+                )
+                DELETE FROM ""{_storage.Options.SchemaName}"".""{table}"" WHERE ""id"" = ANY (ARRAY(SELECT ""id"" FROM ""ids""));
+                ", transaction: transaction);
+
+            // XXX: Rollback to default scenario
+            connection.Execute($@"
+              SET session_replication_role='origin';
+          ");
+
+            if (removedCount <= 0)
+            {
+              continue;
+            }
+
+            _logger.InfoFormat("Removed {0} outdated record(s) from '{1}' table.", removedCount, table);
+
+            cancellationToken.WaitHandle.WaitOne(_delayBetweenPasses);
+            cancellationToken.ThrowIfCancellationRequested();
+          }
+
+          while (removedCount != 0);
+
+          transaction.Commit();
+        });
     }
 
     public void Execute(BackgroundProcessContext context)
@@ -76,34 +130,41 @@ namespace Hangfire.PostgreSql
       {
         _logger.DebugFormat("Removing outdated records from table '{0}'...", table);
 
-        UseConnectionDistributedLock(_storage, connection => {
-          using IDbTransaction transaction = connection.BeginTransaction();
-          int removedCount;
-          do
-          {
-            removedCount = connection.Execute($@"
-                DELETE FROM ""{_storage.Options.SchemaName}"".""{table}"" 
-                WHERE ""id"" IN (
-                    SELECT ""id"" 
-                    FROM ""{_storage.Options.SchemaName}"".""{table}"" 
-                    WHERE ""expireat"" < NOW() 
-                    LIMIT {_storage.Options.DeleteExpiredBatchSize.ToString(CultureInfo.InvariantCulture)}
-                )", transaction: transaction);
-
-            if (removedCount <= 0)
+        if (_enhancedTables.Any(x => x == table))
+        {
+          EnhancedJobExpire(table, cancellationToken);
+        }
+        else
+        {
+          UseConnectionDistributedLock(_storage, connection => {
+            using IDbTransaction transaction = connection.BeginTransaction();
+            int removedCount;
+            do
             {
-              continue;
+              removedCount = connection.Execute($@"
+                  DELETE FROM ""{_storage.Options.SchemaName}"".""{table}""
+                  WHERE ""id"" IN (
+                      SELECT ""id""
+                      FROM ""{_storage.Options.SchemaName}"".""{table}""
+                      WHERE ""expireat"" < NOW()
+                      LIMIT {_storage.Options.DeleteExpiredBatchSize.ToString(CultureInfo.InvariantCulture)}
+                  )", transaction: transaction);
+
+              if (removedCount <= 0)
+              {
+                continue;
+              }
+
+              _logger.InfoFormat("Removed {0} outdated record(s) from '{1}' table.", removedCount, table);
+
+              cancellationToken.WaitHandle.WaitOne(_delayBetweenPasses);
+              cancellationToken.ThrowIfCancellationRequested();
             }
+            while (removedCount != 0);
 
-            _logger.InfoFormat("Removed {0} outdated record(s) from '{1}' table.", removedCount, table);
-
-            cancellationToken.WaitHandle.WaitOne(_delayBetweenPasses);
-            cancellationToken.ThrowIfCancellationRequested();
-          }
-          while (removedCount != 0);
-
-          transaction.Commit();
-        });
+            transaction.Commit();
+          });
+        }
       }
 
       AggregateCounters(cancellationToken);
