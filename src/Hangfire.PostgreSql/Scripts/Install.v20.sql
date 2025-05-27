@@ -1,4 +1,5 @@
-﻿SET search_path = 'hangfire';
+﻿SET TRANSACTION ISOLATION LEVEL READ COMMITTED; -- On Yugabyte mixing queries & schema changes requires RC. And this has no bad effects on psql either.
+SET search_path = 'hangfire';
 
 DO $$
 BEGIN

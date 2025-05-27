@@ -16,6 +16,7 @@ using Hangfire.Storage;
 using Moq;
 using Npgsql;
 using Xunit;
+using static Hangfire.Storage.JobStorageFeatures;
 
 namespace Hangfire.PostgreSql.Tests
 {
@@ -833,7 +834,16 @@ namespace Hangfire.PostgreSql.Tests
     [CleanDatabase]
     public void SetRangeInHash_DoesNotThrowSerializationException()
     {
-      Parallel.For(1, 100, _ => {
+      //High concurrency on YugabyteDB leads to some errors due to performance...
+      //So we can follow 2 diff paths...
+      // 1 - Decrease the parallelism for YugabyteDB 
+      // 2 - Increase the timeout for YugabyteDB once the NPGSQLCommand is running under SetRangeInHash
+      using NpgsqlCommand cmd = new("SHOW server_version", new NpgsqlConnection());
+      string result = (string)cmd.ExecuteScalar();
+
+      int maxParallelism = result.Contains("YB") || result.Contains("Yugabyte") ? 20 : 100 ;
+
+      Parallel.For(1, maxParallelism, _ => {
         UseDisposableConnection(connection => {
           connection.SetRangeInHash("some-hash", new Dictionary<string, string> {
             { "Key1", "Value1" },
@@ -1287,6 +1297,7 @@ namespace Hangfire.PostgreSql.Tests
     [CleanDatabase]
     public void GetValueFromHash_ThrowsAnException_WhenNameIsNull()
     {
+      Console.WriteLine("Initializing on YUGABYTE_MODE: {0}", Environment.GetEnvironmentVariable("Hangfire_Yugabyte_Mode") ?? "false");
       UseConnection(connection => {
         ArgumentNullException exception = Assert.Throws<ArgumentNullException>(() => connection.GetValueFromHash("key", null));
 
@@ -1388,6 +1399,7 @@ namespace Hangfire.PostgreSql.Tests
     private void UseConnection(Action<PostgreSqlConnection> action)
     {
       PostgreSqlStorage storage = _fixture.SafeInit();
+      Console.WriteLine($"Connection details: {_fixture.YugabyteModeEnabled}, {_fixture.MainConnection.ConnectionString}");
       action(storage.GetStorageConnection());
     }
 

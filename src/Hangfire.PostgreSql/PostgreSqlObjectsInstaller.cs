@@ -46,6 +46,8 @@ namespace Hangfire.PostgreSql
       // starts with version 3 to keep in check with Hangfire SqlServer, but I couldn't keep up with that idea after all;
       int version = 3;
       int previousVersion = 1;
+      string suffix = IsYugabyte(connection) ? "yugabyte" : "postgres";
+
       do
       {
         try
@@ -53,8 +55,11 @@ namespace Hangfire.PostgreSql
           string script;
           try
           {
-            script = GetStringResource(typeof(PostgreSqlObjectsInstaller).GetTypeInfo().Assembly,
-              $"Hangfire.PostgreSql.Scripts.Install.v{version.ToString(CultureInfo.InvariantCulture)}.sql");
+            string[] resnames = {
+              $"Hangfire.PostgreSql.Scripts.Install.v{version.ToString(CultureInfo.InvariantCulture)}.{suffix}.sql", //< If exists, we will use the db-specific one
+              $"Hangfire.PostgreSql.Scripts.Install.v{version.ToString(CultureInfo.InvariantCulture)}.sql",
+            };
+            script = GetScriptResource(typeof(PostgreSqlObjectsInstaller).GetTypeInfo().Assembly, resnames);
           }
           catch (MissingManifestResourceException)
           {
@@ -130,16 +135,36 @@ namespace Hangfire.PostgreSql
       return false;
     }
 
-    private static string GetStringResource(Assembly assembly, string resourceName)
+    private static string GetScriptResource(Assembly assembly, params string[] scriptNames)
     {
-      using Stream stream = assembly.GetManifestResourceStream(resourceName);
-      if (stream == null)
+      Stream stream = null;
+
+      foreach (string name in scriptNames)
       {
-        throw new MissingManifestResourceException($"Requested resource `{resourceName}` was not found in the assembly `{assembly}`.");
+        stream = assembly.GetManifestResourceStream(name);
+        if (stream != null)
+        {
+          break;
+        }
       }
 
+      if (stream == null)
+      {
+        string names = string.Join(",", scriptNames);
+        throw new MissingManifestResourceException($"Requested resources `{names}` were not found in the assembly `{assembly}`.");
+      }
+
+      using Stream _ = stream;
       using StreamReader reader = new(stream);
       return reader.ReadToEnd();
+    }
+
+    private static bool IsYugabyte(NpgsqlConnection connection)
+    {
+      using NpgsqlCommand cmd = new("SHOW server_version", connection);
+      string result = (string)cmd.ExecuteScalar();
+
+      return result.Contains("YB") || result.Contains("Yugabyte");
     }
   }
 }

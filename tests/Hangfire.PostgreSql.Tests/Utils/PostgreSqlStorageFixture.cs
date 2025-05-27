@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Globalization;
 using Hangfire.PostgreSql.Factories;
 using Moq;
 using Npgsql;
@@ -10,6 +11,7 @@ namespace Hangfire.PostgreSql.Tests.Utils
     private readonly PostgreSqlStorageOptions _storageOptions;
     private bool _initialized;
     private NpgsqlConnection _mainConnection;
+    private const string YUGABYTE_MODE = "Hangfire_Yugabyte_Mode";
 
     public PostgreSqlStorageFixture()
     {
@@ -24,6 +26,7 @@ namespace Hangfire.PostgreSql.Tests.Utils
       _storageOptions = new PostgreSqlStorageOptions {
         SchemaName = ConnectionUtils.GetSchemaName(),
         EnableTransactionScopeEnlistment = true,
+        EnableYugabyteOptimizations = Convert.ToBoolean(Environment.GetEnvironmentVariable(YUGABYTE_MODE), CultureInfo.InvariantCulture)
       };
     }
 
@@ -33,6 +36,8 @@ namespace Hangfire.PostgreSql.Tests.Utils
 
     public PostgreSqlStorage Storage { get; private set; }
     public NpgsqlConnection MainConnection => _mainConnection ?? (_mainConnection = ConnectionUtils.CreateConnection());
+
+    public bool YugabyteModeEnabled => _storageOptions.EnableYugabyteOptimizations;
 
     public void Dispose()
     {

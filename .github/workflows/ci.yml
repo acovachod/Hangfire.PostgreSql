@@ -29,6 +29,18 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
+      yugabyte:
+        image: yugabytedb/yugabyte:latest
+        env:
+          TZ: Etc/GMT-13
+          PGTZ: Etc/GMT-13
+        options: >-
+          --health-cmd postgres/bin/pg_isready -h yugabyte -p 5433 -U yugabyte
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5433:5433
 
     steps:
       - name: Checkout
@@ -43,11 +55,16 @@ jobs:
         run: dotnet restore
       - name: Build
         run: dotnet build --no-restore
-      - name: Test
-        run: dotnet test --no-build --verbosity normal --logger "trx;LogFileName=TestResults.trx"
+      - name: Test-PSQL
+        run: dotnet test --no-build --verbosity normal --logger "trx;LogFileName=TestResults.PostgreSql.trx"
+      - name: Test-YSQL
+        env:
+          Hangfire_PostgreSql_ConnectionString: "Server=127.0.0.1;Port=5433;Database=yugabyte;User Id=yugabyte;Password=yugabyte;"
+          Hangfire_Yugabyte_Mode: true
+        run: dotnet test --no-build --verbosity normal --logger "trx;LogFileName=TestResults.Yugabyte.trx"
       - name: Test Report
         uses: actions/upload-artifact@v4
         if: success() || failure()
         with:
           name: test-results
-          path: "**/TestResults.trx"
+          path: "**/TestResults.*.trx"

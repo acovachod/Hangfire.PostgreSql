@@ -119,6 +119,7 @@ namespace Hangfire.PostgreSql
     [NotNull]
     internal IFetchedJob Dequeue_Transaction(string[] queues, CancellationToken cancellationToken)
     {
+      Console.WriteLine("Dequeue - 3");
       if (queues == null)
       {
         throw new ArgumentNullException(nameof(queues));

@@ -70,18 +70,71 @@ namespace Hangfire.PostgreSql
       Execute(context.StoppingToken);
     }
 
+    private void EnhancedJobExpire(string table, CancellationToken cancellationToken)
+    {
+      UseConnectionDistributedLock(_storage, connection => {
+        int removedCount;
+        do
+        {
+          using IDbTransaction transaction = connection.BeginTransaction();
+
+          // XXX: To avoid triggers on YugabyteDB we need to disable them on the current session...
+          //      session_replication_role default value is origin.
+          connection.Execute($@"
+              SET session_replication_role='replica';
+          ");
+
+          // XXX: The main goal of the deletion below is to isolate every table related to job and avoid triggers (DELETE ON CASCADE) to improve performance in YugabyteDB.
+          removedCount = connection.Execute($@"
+                WITH ids AS (
+                  SELECT ""id"" FROM ""{_storage.Options.SchemaName}"".""{table}"" WHERE expireat < now() LIMIT {_storage.Options.DeleteExpiredBatchSize.ToString(CultureInfo.InvariantCulture)}
+                ),
+                delete_parameters AS (
+                  DELETE FROM ""{_storage.Options.SchemaName}.jobparameter"" WHERE ""jobid"" = ANY (ARRAY(SELECT ""id"" FROM ""ids""))
+                ),
+                delete_states AS (
+                  DELETE FROM ""{_storage.Options.SchemaName}.state""  WHERE ""jobid"" = ANY (ARRAY(SELECT ""id"" FROM ""ids""))
+                )
+                DELETE FROM ""{_storage.Options.SchemaName}"".""{table}"" WHERE ""id"" = ANY (ARRAY(SELECT ""id"" FROM ""ids""));
+                ", transaction: transaction);
+
+          // XXX: Rollback to default scenario, session_replication_role only applies on current session.
+          connection.Execute($@"
+              SET session_replication_role='origin';
+          ");
+
+          if (removedCount <= 0)
+          {
+            continue;
+          }
+
+          transaction.Commit();
+          _logger.InfoFormat("Removed {0} outdated record(s) from '{1}' table.", removedCount, table);
+
+          cancellationToken.WaitHandle.WaitOne(_delayBetweenPasses);
+          cancellationToken.ThrowIfCancellationRequested();
+        }
+
+        while (removedCount != 0);
+      });
+    }
+
     public void Execute(CancellationToken cancellationToken)
     {
       foreach (string table in _processedTables)
       {
         _logger.DebugFormat("Removing outdated records from table '{0}'...", table);
 
-        UseConnectionDistributedLock(_storage, connection => {
-          int removedCount;
-          do
-          {
-            using IDbTransaction transaction = connection.BeginTransaction();
-            removedCount = connection.Execute($@"
+        if (_storage.Options.EnableYugabyteOptimizations && table == "job")
+          EnhancedJobExpire(table, cancellationToken);
+        else
+        {
+          UseConnectionDistributedLock(_storage, connection => {
+            int removedCount;
+            do
+            {
+              using IDbTransaction transaction = connection.BeginTransaction();
+              removedCount = connection.Execute($@"
                 DELETE FROM ""{_storage.Options.SchemaName}"".""{table}"" 
                 WHERE ""id"" IN (
                     SELECT ""id"" 
@@ -90,23 +143,24 @@ namespace Hangfire.PostgreSql
                     LIMIT {_storage.Options.DeleteExpiredBatchSize.ToString(CultureInfo.InvariantCulture)}
                 )", transaction: transaction);
 
-            if (removedCount <= 0)
-            {
-              continue;
+              if (removedCount <= 0)
+              {
+                continue;
+              }
+
+              transaction.Commit();
+              _logger.InfoFormat("Removed {0} outdated record(s) from '{1}' table.", removedCount, table);
+
+              cancellationToken.WaitHandle.WaitOne(_delayBetweenPasses);
+              cancellationToken.ThrowIfCancellationRequested();
             }
+            while (removedCount != 0);
+          });
+        }
 
-            transaction.Commit();
-            _logger.InfoFormat("Removed {0} outdated record(s) from '{1}' table.", removedCount, table);
-
-            cancellationToken.WaitHandle.WaitOne(_delayBetweenPasses);
-            cancellationToken.ThrowIfCancellationRequested();
-          }
-          while (removedCount != 0);
-        });
+        AggregateCounters(cancellationToken);
+        cancellationToken.WaitHandle.WaitOne(_checkInterval);
       }
-
-      AggregateCounters(cancellationToken);
-      cancellationToken.WaitHandle.WaitOne(_checkInterval);
     }
 
     public override string ToString()

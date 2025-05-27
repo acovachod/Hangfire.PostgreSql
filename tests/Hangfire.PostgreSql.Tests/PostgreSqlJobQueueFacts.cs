@@ -8,6 +8,7 @@ using Dapper;
 using Hangfire.PostgreSql.Tests.Utils;
 using Hangfire.PostgreSql.Utils;
 using Hangfire.Storage;
+using Npgsql;
 using Xunit;
 
 namespace Hangfire.PostgreSql.Tests
@@ -490,7 +491,11 @@ namespace Hangfire.PostgreSql.Tests
         // Only for Postgres 11+ should we have a polling time greater than the timeout.
         if (connection.SupportsNotifications())
         {
-          storage.Options.QueuePollInterval = TimeSpan.FromMinutes(2);
+          // YugabyteDB does not support LISTEN/NOTIFY yet so we need either to keep the default value or decrease the interval to manual checks
+          string result = (string)connection.ExecuteScalar("SHOW server_version");
+
+          if (!result.Contains("YB") || result.Contains("Yugabyte"))
+            storage.Options.QueuePollInterval = TimeSpan.FromMinutes(2);
         }
 
         PostgreSqlJobQueue queue = CreateJobQueue(storage, false, true);

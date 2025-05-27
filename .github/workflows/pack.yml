@@ -50,6 +50,18 @@ jobs:
           --health-retries 5
         ports:
           - 5432:5432
+      yugabyte:
+        image: yugabytedb/yugabyte:latest
+        env:
+          TZ: Etc/GMT-13
+          PGTZ: Etc/GMT-13
+        options: >-
+          --health-cmd postgres/bin/pg_isready -h yugabyte -p 5433 -U yugabyte
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+        ports:
+          - 5433:5433
 
     steps:
       - name: Checkout
@@ -64,13 +76,18 @@ jobs:
         run: dotnet restore
       - name: Build
         run: dotnet build -c Release --no-restore
-      - name: Test
-        run: dotnet test -c Release --no-build --verbosity normal --logger "trx;LogFileName=TestResults.trx" || true
+      - name: Test-PGSQL
+        run: dotnet test -c Release --no-build --verbosity normal --logger "trx;LogFileName=TestResults.PostgreSql.trx" || true
+      - name: Test-YSQL
+        env:
+          Hangfire_PostgreSql_ConnectionString: "Server=127.0.0.1;Port=5433;Database=yugabyte;User Id=yugabyte;Password=yugabyte;"
+          Hangfire_Yugabyte_Mode: true
+        run: dotnet test -c Release --no-build --verbosity normal --logger "trx;LogFileName=TestResults.Yugabyte.trx" || true
       - name: Test Report
         uses: dorny/test-reporter@v1
         if: always()
         with:
           name: Test results
-          path: "**/TestResults.trx"
+          path: "**/TestResults.*.trx"
           reporter: dotnet-trx
           fail-on-error: true

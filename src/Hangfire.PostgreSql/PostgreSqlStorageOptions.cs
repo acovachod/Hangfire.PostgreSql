@@ -50,6 +50,7 @@ namespace Hangfire.PostgreSql
       EnableTransactionScopeEnlistment = true;
       DeleteExpiredBatchSize = 1000;
       UseSlidingInvisibilityTimeout = false;
+      EnableYugabyteOptimizations = false;
     }
 
     public TimeSpan QueuePollInterval
@@ -133,6 +134,8 @@ namespace Hangfire.PostgreSql
     ///   since the background storage processes are not run (which is used to update the invisibility timeouts)
     /// </summary>
     public bool UseSlidingInvisibilityTimeout { get; set; }
+
+    public bool EnableYugabyteOptimizations { get; set; }
 
     private static void ThrowIfValueIsNotPositive(TimeSpan value, string fieldName)
     {
